@@ -1,0 +1,15 @@
+# Environment configuration (contains passwords!)
+.env
+.env.local
+.env.*.local
+
+# Ansible
+*.retry
+
+# Backup files
+*.bak
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

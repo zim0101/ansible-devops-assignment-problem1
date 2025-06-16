@@ -1,0 +1,157 @@
+- name: Get commit hash from local git repository
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    flask_repo_path: "{{ flask_app_repo | default(lookup('env', 'FLASK_APP_REPO') | default('../flask-webapp')) }}"
+  tasks:
+    - name: Display repository path
+      debug:
+        msg: "Using Flask repository: {{ flask_repo_path }}"
+
+    - name: Check if Flask repository exists
+      stat:
+        path: "{{ flask_repo_path }}"
+      register: repo_check
+
+    - name: Fail if repository doesn't exist
+      fail:
+        msg: "Flask repository not found at {{ flask_repo_path }}"
+      when: not repo_check.stat.exists
+
+    - name: Get current commit hash
+      shell: cd "{{ flask_repo_path }}" && git rev-parse --short HEAD
+      register: git_commit_result
+
+    - name: Set commit hash fact
+      set_fact:
+        current_commit: "{{ git_commit_result.stdout }}"
+
+    - name: Display detected commit hash
+      debug:
+        msg: "Detected commit hash: {{ current_commit }}"
+
+- name: Install Docker (if needed)
+  hosts: all
+  tasks:
+    - name: Check if Docker is installed
+      shell: which docker
+      register: docker_check
+      ignore_errors: true
+
+    - name: Download Docker install script
+      get_url:
+        url: https://get.docker.com
+        dest: /tmp/get-docker.sh
+        mode: '0755'
+      when: docker_check.rc != 0
+
+    - name: Install Docker using convenience script
+      shell: sh /tmp/get-docker.sh
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+      become: true
+      when: docker_check.rc != 0
+
+- name: Deploy Flask Web Applications
+  hosts: webservers
+  vars:
+    docker_image: "{{ webapp_image | default('zim0101/flask-webapp:latest') }}"
+    commit_hash: "{{ webapp_commit | default(hostvars['localhost']['current_commit']) }}"
+  tasks:
+    - name: Display deployment info
+      debug:
+        msg: "Deploying {{ docker_image }} with commit {{ commit_hash }} to {{ hostname }}"
+
+    - name: Pull Flask webapp image
+      command: docker pull {{ docker_image }}
+
+    - name: Stop existing webapp container
+      command: docker stop webapp
+      ignore_errors: true
+
+    - name: Remove existing webapp container
+      command: docker rm webapp
+      ignore_errors: true
+
+    - name: Run Flask container with VM hostname
+      command: >
+        docker run -d
+        --name webapp
+        -p 3000:3000
+        -e COMMIT_HASH="{{ commit_hash }}"
+        -e VM_HOSTNAME="{{ hostname }}"
+        --restart unless-stopped
+        {{ docker_image }}
+
+    - name: Wait for Flask app to start
+      wait_for:
+        port: 3000
+        timeout: 30
+
+    - name: Test Flask app is responding
+      uri:
+        url: "http://localhost:3000/health"
+        method: GET
+      retries: 3
+      delay: 5
+
+- name: Deploy Nginx Proxy
+  hosts: proxy
+  tasks:
+    - name: Create proxy-server directory
+      file:
+        path: ~/proxy-server
+        state: directory
+
+    - name: Create nginx config directory
+      file:
+        path: ~/proxy-server/nginx/conf
+        state: directory
+
+    - name: Copy nginx config
+      copy:
+        src: files/nginx.conf
+        dest: ~/proxy-server/nginx/conf/nginx.conf
+
+    - name: Copy docker-compose file
+      copy:
+        src: files/docker-compose.yml
+        dest: ~/proxy-server/docker-compose.yml
+
+    - name: Stop existing proxy
+      command: docker compose down
+      args:
+        chdir: ~/proxy-server
+      ignore_errors: true
+
+    - name: Start proxy
+      command: docker compose up -d
+      args:
+        chdir: ~/proxy-server
+
+    - name: Wait for proxy to start
+      wait_for:
+        port: 80
+        timeout: 30
+
+    - name: Test proxy health
+      uri:
+        url: "http://localhost/health"
+        method: GET
+      retries: 3
+      delay: 5
