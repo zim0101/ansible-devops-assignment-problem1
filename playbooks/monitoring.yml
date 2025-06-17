@@ -1,0 +1,73 @@
+- name: Setup Monitoring Stack (Prometheus + Grafana)
+  hosts: proxy
+  tasks:
+    - name: Stop any existing monitoring services
+      command: docker compose down
+      args:
+        chdir: ~/proxy-server
+      ignore_errors: true
+
+    - name: Remove any existing volumes (for clean restart)
+      command: docker volume prune -f
+      ignore_errors: true
+
+    - name: Create monitoring base directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - ~/proxy-server/prometheus
+        - ~/proxy-server/grafana
+        - ~/proxy-server/grafana/provisioning
+        - ~/proxy-server/grafana/provisioning/datasources
+        - ~/proxy-server/grafana/provisioning/dashboards
+
+    - name: Copy Prometheus configuration
+      copy:
+        src: files/prometheus.yml
+        dest: ~/proxy-server/prometheus/prometheus.yml
+        mode: '0644'
+
+    - name: Copy updated docker-compose file with monitoring services
+      copy:
+        src: files/docker-compose.yml
+        dest: ~/proxy-server/docker-compose.yml
+        mode: '0644'
+
+    - name: Pull required monitoring images
+      command: "{{ item }}"
+      loop:
+        - docker pull prom/prometheus:latest
+        - docker pull grafana/grafana:latest
+
+    - name: Start monitoring stack
+      command: docker compose up -d
+      args:
+        chdir: ~/proxy-server
+
+    - name: Wait for Prometheus to start
+      wait_for:
+        port: 9090
+        timeout: 60
+        delay: 15
+
+    - name: Wait for Grafana to start
+      wait_for:
+        port: 3001
+        timeout: 60
+        delay: 15
+
+    - name: Test Prometheus is responding
+      uri:
+        url: "http://localhost:9090/-/healthy"
+        method: GET
+      retries: 5
+      delay: 10
+
+    - name: Test Grafana is responding
+      uri:
+        url: "http://localhost:3001/api/health"
+        method: GET
+      retries: 5
+      delay: 10

@@ -1,0 +1,70 @@
+- name: Deploy Node Exporter on All VMs
+  hosts: all
+  tasks:
+    - name: Check if Docker is installed
+      shell: which docker
+      register: docker_check
+      ignore_errors: true
+
+    - name: Download Docker install script (if needed)
+      get_url:
+        url: https://get.docker.com
+        dest: /tmp/get-docker.sh
+        mode: '0755'
+      when: docker_check.rc != 0
+
+    - name: Install Docker using convenience script (if needed)
+      shell: sh /tmp/get-docker.sh
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Add user to docker group (if needed)
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Start and enable Docker (if needed)
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Stop existing node-exporter container
+      command: docker stop node-exporter
+      ignore_errors: true
+
+    - name: Remove existing node-exporter container
+      command: docker rm node-exporter
+      ignore_errors: true
+
+    - name: Pull Node Exporter image
+      command: docker pull prom/node-exporter:latest
+
+    - name: Run Node Exporter container
+      command: >
+        docker run -d
+        --name node-exporter
+        --restart unless-stopped
+        --net="host"
+        --pid="host"
+        -v "/:/host:ro,rslave"
+        prom/node-exporter:latest
+        --path.rootfs=/host
+
+    - name: Wait for Node Exporter to start
+      wait_for:
+        port: 9100
+        timeout: 30
+
+    - name: Test Node Exporter is responding
+      uri:
+        url: "http://localhost:9100/metrics"
+        method: GET
+        status_code: 200
+      retries: 3
+      delay: 5
